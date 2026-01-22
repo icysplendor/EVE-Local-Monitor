@@ -8,91 +8,107 @@ class VisionEngine:
         self.sct = mss.mss()
         self.hostile_templates = []
         self.monster_templates = []
-        # 新增：记录最后一次的错误原因
-        self.last_error = "" 
+        
+        # 状态诊断变量
+        self.template_status_msg = "初始化中..."
+        self.last_screenshot_shape = "无"
+        self.last_error = None
         
         # 调试目录
-        self.debug_dir = "debug_scans"
+        self.debug_dir = os.path.join(os.getcwd(), "debug_scans")
         if not os.path.exists(self.debug_dir):
             os.makedirs(self.debug_dir)
             
         self.load_templates()
 
     def load_templates(self):
-        # 获取绝对路径，防止打包后路径错乱
-        base_dir = os.path.abspath(os.getcwd())
+        base_dir = os.getcwd()
         path_hostile = os.path.join(base_dir, "assets", "hostile_icons")
         path_monster = os.path.join(base_dir, "assets", "monster_icons")
         
-        self.hostile_templates = self._load_images_from_folder(path_hostile, "Hostile")
-        self.monster_templates = self._load_images_from_folder(path_monster, "Monster")
+        self.hostile_templates = self._load_images_from_folder(path_hostile)
+        self.monster_templates = self._load_images_from_folder(path_monster)
+        
+        # 生成诊断信息
+        self.template_status_msg = (
+            f"路径: {base_dir}\n"
+            f"敌对模板: {len(self.hostile_templates)} 张\n"
+            f"怪物模板: {len(self.monster_templates)} 张"
+        )
 
-    def _load_images_from_folder(self, folder, tag):
+    def _load_images_from_folder(self, folder):
         templates = []
         if not os.path.exists(folder):
-            os.makedirs(folder)
+            try:
+                os.makedirs(folder)
+            except:
+                pass
             return templates
             
         for filename in os.listdir(folder):
             if filename.lower().endswith(('.png', '.jpg', '.bmp')):
                 path = os.path.join(folder, filename)
-                img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-                if img is not None:
-                    # 即使是JPG，也统一检查一下维度
-                    templates.append(img)
-                else:
-                    print(f"Failed to load: {filename}")
+                try:
+                    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+                    if img is not None:
+                        templates.append(img)
+                except:
+                    pass
         return templates
 
     def capture_screen(self, region, debug_name=None):
-        if not region: return None
+        self.last_error = None # 重置错误
+        if not region: 
+            return None
+        
         monitor = {"top": int(region[1]), "left": int(region[0]), "width": int(region[2]), "height": int(region[3])}
         try:
             img = np.array(self.sct.grab(monitor))
             img_bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-            # 保存一下截图，方便你看程序到底看见了什么
+            
+            # 记录这次截图的尺寸，证明截图成功了
+            h, w = img_bgr.shape[:2]
+            self.last_screenshot_shape = f"{w}x{h}"
+            
             if debug_name:
                 cv2.imwrite(os.path.join(self.debug_dir, f"debug_{debug_name}.png"), img_bgr)
             return img_bgr
-        except:
+        except Exception as e:
+            self.last_error = f"截图失败: {str(e)}"
             return None
 
     def match_templates(self, screen_img, template_list, threshold, return_max_val=False):
-        # 重置错误信息
-        self.last_error = ""
-
+        # 1. 检查截图
         if screen_img is None:
-            self.last_error = "截图无效(未画框?)"
-            return (False, 0.0) if return_max_val else False
+            # 如果已有更具体的截图错误，用那个；否则认为是没画框
+            err = self.last_error if self.last_error else "未获取到截图(区域未设置?)"
+            return (err, 0.0) if return_max_val else False
             
+        # 2. 检查模板
         if not template_list:
-            self.last_error = "无模板文件"
-            return (False, 0.0) if return_max_val else False
+            return ("无模板文件(请检查assets)", 0.0) if return_max_val else False
 
         screen_gray = cv2.cvtColor(screen_img, cv2.COLOR_BGR2GRAY)
-        screen_h, screen_w = screen_gray.shape[:2]
-        
         max_score_found = 0.0
-        valid_templates_count = 0 
+        
+        # 记录是否所有模板都因为尺寸问题被跳过
+        all_skipped = True 
 
-        for i, tmpl in enumerate(template_list):
+        for tmpl in template_list:
             tmpl_h, tmpl_w = tmpl.shape[:2]
+            screen_h, screen_w = screen_gray.shape[:2]
             
-            # === 关键检查：模板尺寸是否大于截图 ===
+            # 尺寸保护
             if screen_h < tmpl_h or screen_w < tmpl_w:
-                # 记录第一张出错模板的详情
-                if self.last_error == "":
-                    self.last_error = f"尺寸大过截图(模{tmpl_w}x{tmpl_h} vs 屏{screen_w}x{screen_h})"
-                continue # 跳过这张过大的图
-
-            valid_templates_count += 1
+                continue 
             
+            all_skipped = False # 至少有一个模板尺寸是合适的
+
             mask = None
             if tmpl.shape[2] == 4:
                 b, g, r, a = cv2.split(tmpl)
-                tmpl_bgr = cv2.merge([b, g, r])
-                tmpl_gray = cv2.cvtColor(tmpl_bgr, cv2.COLOR_BGR2GRAY)
                 mask = a
+                tmpl_gray = cv2.cvtColor(cv2.merge([b,g,r]), cv2.COLOR_BGR2GRAY)
             else:
                 tmpl_gray = cv2.cvtColor(tmpl, cv2.COLOR_BGR2GRAY)
 
@@ -105,15 +121,15 @@ class VisionEngine:
                 _, max_val, _, _ = cv2.minMaxLoc(res)
                 if max_val > max_score_found:
                     max_score_found = max_val
-            except Exception as e:
-                self.last_error = f"CV错误 {str(e)}"
+            except:
                 continue
 
-        # 如果遍历完了，一个有效模板都没找到
-        if valid_templates_count == 0 and not self.last_error:
-             self.last_error = "所有模板均过大"
+        # 如果所有模板都被跳过，说明模板虽然有，但都比截图大
+        if all_skipped:
+            return ("所有模板均大于截图区域", 0.0) if return_max_val else False
 
         if return_max_val:
-            return (max_score_found >= threshold, max_score_found)
+            # 返回具体分数，没有错误字符串
+            return (None, max_score_found)
         else:
             return max_score_found >= threshold
