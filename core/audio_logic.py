@@ -1,12 +1,12 @@
 import time
 import threading
 import requests
-from PyQt6.QtMultimedia import QSoundEffect
-from PyQt6.QtCore import QUrl, QThread, pyqtSignal
-from PyQt6.QtCore import QObject
+import os
+from datetime import datetime
+from PyQt6.QtCore import QObject, pyqtSignal
 
 class AlarmWorker(QObject):
-    # 用信号来通知主界面状态更新（比如日志）
+    # 信号通知主界面及日志
     log_signal = pyqtSignal(str)
 
     def __init__(self, config_manager, vision_engine):
@@ -22,9 +22,6 @@ class AlarmWorker(QObject):
             "overview": False,
             "monster": False
         }
-        
-        # 音频播放器缓存
-        self.players = {}
 
     def start(self):
         self.running = True
@@ -36,49 +33,27 @@ class AlarmWorker(QObject):
         if self.thread:
             self.thread.join()
 
-    def _play_sound(self, sound_key):
-        # 获取路径
-        path = self.cfg.get("audio_paths").get(sound_key)
-        if not path or not os.path.exists(path):
-            return
-
-        # 简单的播放逻辑，实际可以用PyQt的QSoundEffect
-        # 这里为了线程安全和阻塞控制，简单演示逻辑
-        # 在完整GUI中，推荐发送信号给主线程播放声音，或者使用winsound/pygame
-        # 这里我们假定用 QSoundEffect 在主线程中预加载好了
-        self.log_signal.emit(f"播放报警: {sound_key}")
-        
-        # 触发 Webhook (异步)
-        webhook_url = self.cfg.get("webhook_url")
-        if webhook_url:
-            try:
-                threading.Thread(target=requests.post, args=(webhook_url,), kwargs={'json':{'alert': sound_key}}).start()
-            except:
-                pass
-
     def _loop(self):
-        import os # 确保在线程内可用
-        # 使用 winsound 仅限 Windows，如果是Mac开发调试要改用其他库
-        # 为了兼容性，这里我们模拟一个阻塞。
-        # 实际建议在 Main GUI 初始化 QSoundEffect，通过信号触发播放。
-        
         while self.running:
-            # 1. 获取检测结果
+            # 获取当前时间戳 (带毫秒)
+            now_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+            # 1. 获取检测参数
             regions = self.cfg.get("regions")
             t_hostile = self.cfg.get("thresholds")["hostile"]
             t_monster = self.cfg.get("thresholds")["monster"]
 
-            # 截图并检测
-            img_local = self.vision.capture_screen(regions["local"])
-            img_overview = self.vision.capture_screen(regions["overview"])
-            img_monster = self.vision.capture_screen(regions["monster"])
+            # 2. 截图与识别
+            # 如果区域还没设置，vision返回None，match_templates返回False
+            img_local = self.vision.capture_screen(regions.get("local"))
+            img_overview = self.vision.capture_screen(regions.get("overview"))
+            img_monster = self.vision.capture_screen(regions.get("monster"))
 
             self.status["local"] = self.vision.match_templates(img_local, self.vision.hostile_templates, t_hostile)
             self.status["overview"] = self.vision.match_templates(img_overview, self.vision.hostile_templates, t_hostile)
-            # 怪物识别可以用 detect_monster_text
             self.status["monster"] = self.vision.match_templates(img_monster, self.vision.monster_templates, t_monster)
 
-            # 2. 决策逻辑 (优先级)
+            # 3. 决策逻辑
             is_local = self.status["local"]
             is_overview = self.status["overview"]
             is_monster = self.status["monster"]
@@ -95,17 +70,30 @@ class AlarmWorker(QObject):
             elif is_monster:
                 sound_to_play = "monster"
 
-            # 3. 执行报警
+            # 4. 强制日志输出 (包含状态)
+            status_desc = f"[状态: L:{int(is_local)} | O:{int(is_overview)} | M:{int(is_monster)}]"
+            
             if sound_to_play:
-                # 发送信号让主界面播放，或者直接在这里播放(如果在后台线程使用win32api)
-                # 为了简化，我们假设这是一个阻塞操作，播放完才继续下一轮
-                # 实际生产中，我们可以使用 PyQt 的 Signal 通知主线程播放
-                self.log_signal.emit(f"检测到威胁!! 类型: {sound_to_play}")
+                log_msg = f"[{now_str}] ⚠️ 触发报警: {sound_to_play.upper()} {status_desc}"
+                self.log_signal.emit(log_msg)
                 
-                # 休眠模拟播放时间，或者直到声音结束
-                # 这里发送一个信号给主程序去播放真正的声音
-                # 这种设计下，logic模块不直接碰音频驱动，最稳定
-                time.sleep(2) 
+                # 触发Webhook (异步)
+                webhook_url = self.cfg.get("webhook_url")
+                if webhook_url:
+                    try:
+                        threading.Thread(target=requests.post, args=(webhook_url,), kwargs={'json':{'alert': sound_to_play}}).start()
+                    except:
+                        pass
+                
+                # 休眠较长时间，模拟声音播放或避免刷屏
+                # 因为用户要求"持续输出检测状态"，这里的sleep建议适中，
+                # 如果是真实环境，可能要等待声音播放完。这里设置为2秒。
+                # 在这2秒内界面会暂停日志刷新，代表"正在报警中"
+                time.sleep(2.0)
+                
             else:
-                # 安全状态，快速轮询
-                time.sleep(0.2)
+                log_msg = f"[{now_str}] ✅ 监控中...安全 {status_desc}"
+                self.log_signal.emit(log_msg)
+                
+                # 安全状态下的快速轮询间隔 (例如 0.5秒)
+                time.sleep(0.5)
