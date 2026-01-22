@@ -10,13 +10,11 @@ DEFAULT_CONFIG = {
         "overview": None,
         "monster": None
     },
-    # === 修改点：拆分阈值，默认 0.95 ===
     "thresholds": {
-        "local": 0.95,
-        "overview": 0.95,
-        "monster": 0.95
+        "local": 0.95,    # [修改] 明确区分 local
+        "overview": 0.95, # [新增] 明确区分 overview
+        "monster": 0.95   # [修改] 默认值改为 0.95
     },
-    # ==================================
     "webhook_url": "",
     "audio_paths": {
         "local": "",
@@ -36,14 +34,20 @@ class ConfigManager:
             try:
                 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                     data = json.load(f)
+                    # 深度合并逻辑，防止新加的字段在旧配置里不存在而报错
                     for k, v in data.items():
                         if k in self.config:
                             if isinstance(v, dict):
-                                self.config[k].update(v)
+                                for sub_k, sub_v in v.items():
+                                    if sub_k in self.config[k]:
+                                        self.config[k][sub_k] = sub_v
+                                    else:
+                                        # 如果旧配置里没有这个子字段，保留默认值
+                                        pass
                             else:
                                 self.config[k] = v
             except:
-                print("Config load failed, using defaults")
+                print("Config load failed, using defaults.")
 
     def save(self):
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
