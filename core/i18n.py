@@ -6,12 +6,10 @@ LANGUAGES = {
         "btn_local": "本地栏",
         "btn_overview": "总览栏",
         "btn_npc": "怪物栏",
-        "lbl_webhook": "Webhook:",
-        # === 新增阈值标签 ===
         "lbl_th_local": "本地阈值:",
         "lbl_th_over": "总览阈值:",
         "lbl_th_npc": "怪物阈值:",
-        # ==================
+        "lbl_webhook": "Webhook:",
         "lbl_sound_local": "本地预警:",
         "lbl_sound_overview": "总览预警:",
         "lbl_sound_npc": "刷怪提示:",
@@ -34,12 +32,10 @@ LANGUAGES = {
         "btn_local": "Local",
         "btn_overview": "Overview",
         "btn_npc": "Rats",
+        "lbl_th_local": "Local %:",
+        "lbl_th_over": "Over %:",
+        "lbl_th_npc": "Rats %:",
         "lbl_webhook": "Webhook:",
-        # === New Threshold Labels ===
-        "lbl_th_local": "Local Thresh:",
-        "lbl_th_over": "Over Thresh:",
-        "lbl_th_npc": "Rat Thresh:",
-        # ============================
         "lbl_sound_local": "Local:",
         "lbl_sound_overview": "Overview:",
         "lbl_sound_npc": "Rats:",
