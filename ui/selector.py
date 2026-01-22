@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import QWidget, QRubberBand, QApplication
-from PyQt6.QtCore import Qt, QRect, QPoint, pyqtSignal
-from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtCore import Qt, QRect, QPoint, pyqtSignal, QSize
+from PyQt6.QtGui import QColor, QPalette, QScreen
 
 class RegionSelector(QWidget):
     # 信号：选区结束，发送 (x, y, w, h)
@@ -8,14 +8,24 @@ class RegionSelector(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        # 无边框 + 顶层显示 + 工具窗口(避免任务栏图标)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | 
+                            Qt.WindowType.WindowStaysOnTopHint | 
+                            Qt.WindowType.Tool)
+        
+        # 设置半透明黑色背景
         self.setStyleSheet("background-color: black;")
-        self.setWindowOpacity(0.3)  # 半透明遮罩
+        self.setWindowOpacity(0.3) 
         self.setCursor(Qt.CursorShape.CrossCursor)
         
-        # 这个很重要，铺满全屏
-        screen_geo = QApplication.primaryScreen().geometry()
-        self.setGeometry(screen_geo)
+        # === 核心修改：计算所有屏幕的组合区域 ===
+        total_rect = QRect()
+        for screen in QApplication.screens():
+            total_rect = total_rect.united(screen.geometry())
+        
+        # 将窗口移动到组合区域的左上角，并设置大小
+        self.setGeometry(total_rect)
+        # ======================================
 
         self.rubberBand = QRubberBand(QRubberBand.Shape.Rectangle, self)
         self.origin = QPoint()
@@ -23,7 +33,7 @@ class RegionSelector(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.origin = event.pos()
-            self.rubberBand.setGeometry(QRect(self.origin, QSize()));
+            self.rubberBand.setGeometry(QRect(self.origin, QSize()))
             self.rubberBand.show()
 
     def mouseMoveEvent(self, event):
@@ -37,7 +47,13 @@ class RegionSelector(QWidget):
             global_pos = self.mapToGlobal(rect.topLeft())
             x, y, w, h = global_pos.x(), global_pos.y(), rect.width(), rect.height()
             
-            self.selection_finished.emit((x, y, w, h))
+            # 发送坐标前做一下防抖，防止误触宽高为0
+            if w > 5 and h > 5:
+                self.selection_finished.emit((x, y, w, h))
+            
             self.close()
             
-from PyQt6.QtCore import QSize
+    def keyPressEvent(self, event):
+        # 允许按 ESC 取消
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
