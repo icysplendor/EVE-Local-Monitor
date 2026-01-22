@@ -32,7 +32,6 @@ class AlarmWorker(QObject):
         while self.running:
             now_str = datetime.now().strftime("%H:%M:%S")
             
-            # 系统自检报告
             if self.first_run:
                 self.vision.load_templates()
                 report = (
@@ -45,8 +44,6 @@ class AlarmWorker(QObject):
                 time.sleep(1)
 
             regions = self.cfg.get("regions")
-            
-            # === 修改点：分别获取三个独立的阈值 ===
             thresholds = self.cfg.get("thresholds")
             t_local = thresholds.get("local", 0.95)
             t_overview = thresholds.get("overview", 0.95)
@@ -57,15 +54,19 @@ class AlarmWorker(QObject):
             img_overview = self.vision.capture_screen(regions.get("overview"), "overview")
             img_monster = self.vision.capture_screen(regions.get("monster"), "monster")
 
-            # 匹配逻辑
             def process_match(img, templates, thresh):
                 err_msg, score = self.vision.match_templates(img, templates, thresh, True)
                 is_hit = score >= thresh
                 return is_hit, score, err_msg
 
-            # === 修改点：传入各自的阈值 ===
-            is_local, score_local, err_local = process_match(img_local, self.vision.hostile_templates, t_local)
-            is_overview, score_overview, err_overview = process_match(img_overview, self.vision.hostile_templates, t_overview)
+            # === 修改点：使用各自独立的图标库 ===
+            # Local 截图 -> 匹配 local_templates
+            is_local, score_local, err_local = process_match(img_local, self.vision.local_templates, t_local)
+            
+            # Overview 截图 -> 匹配 overview_templates
+            is_overview, score_overview, err_overview = process_match(img_overview, self.vision.overview_templates, t_overview)
+            
+            # Monster 截图 -> 匹配 monster_templates
             is_monster, score_monster, err_monster = process_match(img_monster, self.vision.monster_templates, t_monster)
 
             self.status["local"] = is_local
