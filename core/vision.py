@@ -5,16 +5,15 @@ import os
 
 class VisionEngine:
     def __init__(self):
-        # 移除 self.sct = mss.mss()，因为这会导致跨线程崩溃
-        self.hostile_templates = []
+        # 分离敌对图标库
+        self.local_templates = []
+        self.overview_templates = []
         self.monster_templates = []
         
-        # 状态诊断变量
         self.template_status_msg = "初始化中..."
         self.last_screenshot_shape = "无"
         self.last_error = None
         
-        # 调试目录
         self.debug_dir = os.path.join(os.getcwd(), "debug_scans")
         if not os.path.exists(self.debug_dir):
             os.makedirs(self.debug_dir)
@@ -23,16 +22,20 @@ class VisionEngine:
 
     def load_templates(self):
         base_dir = os.getcwd()
-        path_hostile = os.path.join(base_dir, "assets", "hostile_icons")
+        # 修改点：指向两个不同的文件夹
+        path_local = os.path.join(base_dir, "assets", "hostile_icons_local")
+        path_overview = os.path.join(base_dir, "assets", "hostile_icons_overview")
         path_monster = os.path.join(base_dir, "assets", "monster_icons")
         
-        self.hostile_templates = self._load_images_from_folder(path_hostile)
+        self.local_templates = self._load_images_from_folder(path_local)
+        self.overview_templates = self._load_images_from_folder(path_overview)
         self.monster_templates = self._load_images_from_folder(path_monster)
         
         self.template_status_msg = (
             f"路径: {base_dir}\n"
-            f"敌对模板: {len(self.hostile_templates)} 张\n"
-            f"怪物模板: {len(self.monster_templates)} 张"
+            f"本地图标: {len(self.local_templates)} 张\n"
+            f"总览图标: {len(self.overview_templates)} 张\n"
+            f"怪物图标: {len(self.monster_templates)} 张"
         )
 
     def _load_images_from_folder(self, folder):
@@ -63,14 +66,10 @@ class VisionEngine:
         monitor = {"top": int(region[1]), "left": int(region[0]), "width": int(region[2]), "height": int(region[3])}
         
         try:
-            # === 核心修复 ===
-            # 使用 with 语句，在当前线程内动态创建 mss 实例
-            # 用完即销毁，确保线程安全
             with mss.mss() as sct:
                 img = np.array(sct.grab(monitor))
                 img_bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
                 
-                # 记录这次截图的尺寸
                 h, w = img_bgr.shape[:2]
                 self.last_screenshot_shape = f"{w}x{h}"
                 
@@ -79,7 +78,6 @@ class VisionEngine:
                 return img_bgr
                 
         except Exception as e:
-            # 这里的错误信会非常具体
             self.last_error = f"截图失败: {str(e)}"
             return None
 
