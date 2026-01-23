@@ -4,7 +4,7 @@ import ctypes
 from ctypes import wintypes
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QFileDialog, 
-                             QGroupBox, QDoubleSpinBox, QLineEdit, QTextEdit, QDialog, QFrame)
+                             QGroupBox, QDoubleSpinBox, QLineEdit, QTextEdit, QDialog, QFrame, QSizePolicy)
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QPixmap, QImage, QFont, QIcon
 from PyQt6.QtMultimedia import QSoundEffect
@@ -17,32 +17,22 @@ from core.audio_logic import AlarmWorker
 from core.i18n import Translator
 
 # =============================================================================
-# === 增强版 Hi-DPI 修复 (支持多显示器不同缩放) ===
+# === 增强版 Hi-DPI 修复 ===
 # =============================================================================
 def apply_dpi_fix():
-    """
-    强制开启 Windows Per-Monitor DPI Awareness V2。
-    这确保 Qt 获取的坐标是物理像素坐标，与 MSS 截图库一致。
-    """
     if os.name == 'nt':
         try:
-            # 尝试设置 Per-Monitor DPI Awareness V2 (Windows 10 Creators Update+)
             ctypes.windll.shcore.SetProcessDpiAwareness(2) 
         except Exception:
             try:
-                # 回退到 Per-Monitor DPI Awareness (Windows 8.1+)
                 ctypes.windll.shcore.SetProcessDpiAwareness(1)
             except Exception:
                 try:
-                    # 回退到 System DPI Awareness (Windows Vista+)
                     ctypes.windll.user32.SetProcessDPIAware()
                 except Exception:
                     pass
 
-# 在创建 QApplication 之前调用
 apply_dpi_fix()
-
-# 禁止 Qt 自己的缩放策略，确保获取物理坐标
 os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "0"
 os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"
 os.environ["QT_SCALE_FACTOR"] = "1"
@@ -133,24 +123,35 @@ class DebugWindow(QDialog):
         super().__init__(parent)
         self.setWindowTitle("LIVE VIEW")
         self.setStyleSheet("background-color: #000; color: #00bcd4;")
+        
+        # 使用横向布局，把三个长条并排显示
         layout = QHBoxLayout()
         layout.setContentsMargins(5,5,5,5)
+        layout.setSpacing(10) # 增加一点间距
         
         self.labels = {}
         for key in ["Local", "Overview", "Npc"]:
             vbox = QVBoxLayout()
+            
             lbl_title = QLabel(key.upper())
             lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl_title.setFixedHeight(20) # 标题占少一点高度
+            
             lbl_img = QLabel()
-            lbl_img.setFixedSize(150, 150)
+            # 修改点：设置为窄长模式
+            # 宽度固定 120，高度最大 600
+            lbl_img.setFixedSize(120, 600)
             lbl_img.setStyleSheet("border: 1px solid #333; background: #111;")
-            lbl_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl_img.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter) # 图片顶对齐
+            
             vbox.addWidget(lbl_title)
             vbox.addWidget(lbl_img)
             layout.addLayout(vbox)
             self.labels[key] = lbl_img
             
         self.setLayout(layout)
+        # 调整窗口初始大小
+        self.resize(400, 650)
 
     def update_images(self, img_local, img_overview, img_monster):
         def np2pixmap(np_img):
@@ -158,7 +159,8 @@ class DebugWindow(QDialog):
             h, w, ch = np_img.shape
             bytes_per_line = ch * w
             qimg = QImage(np_img.data, w, h, bytes_per_line, QImage.Format.Format_BGR888)
-            return QPixmap.fromImage(qimg).scaled(150, 150, Qt.AspectRatioMode.KeepAspectRatio)
+            # 缩放时保持比例，宽度限制在120以内，高度随比例自动调整
+            return QPixmap.fromImage(qimg).scaled(120, 600, Qt.AspectRatioMode.KeepAspectRatio)
 
         self.labels["Local"].setPixmap(np2pixmap(img_local))
         self.labels["Overview"].setPixmap(np2pixmap(img_overview))
