@@ -50,24 +50,14 @@ class VisionEngine:
                 try:
                     img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
                     if img is not None:
-                        if img.shape[2] == 4:
-                            b, g, r, a = cv2.split(img)
-                            gray = cv2.cvtColor(cv2.merge([b,g,r]), cv2.COLOR_BGR2GRAY)
-                            gray = self.clahe.apply(gray)
-                            templates.append((gray, a))
-                        else:
-                            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                            gray = self.clahe.apply(gray)
-                            templates.append((gray, None))
+                        if img.shape[2] == 3:
+                            img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+                        templates.append(img)
                 except:
                     pass
         return templates
 
     def capture_screen(self, region, debug_name=None):
-        """
-        截取屏幕并返回图像数据 (BGR格式)。
-        不再保存到硬盘。
-        """
         self.last_error = None
         if not region: 
             return None
@@ -82,13 +72,22 @@ class VisionEngine:
                 h, w = img_bgr.shape[:2]
                 self.last_screenshot_shape = f"{w}x{h}"
                 
-                # 修改点：这里不再执行 cv2.imwrite
-                # 图像数据直接在内存中返回给调用者(main.py)用于显示
+                # 不再保存硬盘，直接返回内存对象
                 return img_bgr
                 
         except Exception as e:
             self.last_error = f"截图失败: {str(e)}"
             return None
+
+    def gamma_correction(self, img, gamma=1.5):
+        """
+        Gamma 校正：
+        Gamma > 1.0 会让暗部更暗，亮部保持。
+        这能有效压制归一化带来的背景噪点。
+        """
+        invGamma = 1.0 / gamma
+        table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+        return cv2.LUT(img, table)
 
     def match_templates(self, screen_img, template_list, threshold, return_max_val=False):
         if screen_img is None:
@@ -99,24 +98,49 @@ class VisionEngine:
             return ("无模板", 0.0) if return_max_val else False
 
         screen_h, screen_w = screen_img.shape[:2]
+        
+        # === 优化步骤 1: 动态范围检查 ===
         screen_gray = cv2.cvtColor(screen_img, cv2.COLOR_BGR2GRAY)
-        screen_enhanced = self.clahe.apply(screen_gray)
+        min_val, max_val, _, _ = cv2.minMaxLoc(screen_gray)
+        
+        # 如果画面最亮和最暗的差值小于 30 (说明画面灰蒙蒙一片，或者纯黑)
+        # 此时强制归一化会把噪点放大成信号，必须跳过
+        if (max_val - min_val) < 30:
+             return ("对比度过低", 0.0) if return_max_val else False
+
+        # === 优化步骤 2: 归一化 + Gamma 压制 ===
+        # 先归一化拉伸
+        screen_norm = cv2.normalize(screen_img, None, 0, 255, cv2.NORM_MINMAX)
+        # 再用 Gamma=1.5 压暗中间调，杀死噪点
+        screen_processed = self.gamma_correction(screen_norm, gamma=1.5)
         
         max_score_found = 0.0
         all_skipped = True 
 
-        for tmpl_gray, mask in template_list:
-            tmpl_h, tmpl_w = tmpl_gray.shape[:2]
+        for tmpl in template_list:
+            tmpl_h, tmpl_w = tmpl.shape[:2]
             
             if screen_h < tmpl_h or screen_w < tmpl_w:
                 continue 
             all_skipped = False 
 
+            # 准备模板
+            mask = None
+            if tmpl.shape[2] == 4:
+                tmpl_bgr = cv2.cvtColor(tmpl, cv2.COLOR_BGRA2BGR)
+                mask = tmpl[:, :, 3]
+            else:
+                tmpl_bgr = tmpl
+            
+            # 模板也做同样的处理：归一化 + Gamma
+            tmpl_norm = cv2.normalize(tmpl_bgr, None, 0, 255, cv2.NORM_MINMAX)
+            tmpl_processed = self.gamma_correction(tmpl_norm, gamma=1.5)
+
             try:
                 if mask is not None:
-                    res = cv2.matchTemplate(screen_enhanced, tmpl_gray, cv2.TM_CCOEFF_NORMED, mask=mask)
+                    res = cv2.matchTemplate(screen_processed, tmpl_processed, cv2.TM_CCOEFF_NORMED, mask=mask)
                 else:
-                    res = cv2.matchTemplate(screen_enhanced, tmpl_gray, cv2.TM_CCOEFF_NORMED)
+                    res = cv2.matchTemplate(screen_processed, tmpl_processed, cv2.TM_CCOEFF_NORMED)
                 
                 _, max_val, _, _ = cv2.minMaxLoc(res)
                 
