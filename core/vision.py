@@ -49,10 +49,8 @@ class VisionEngine:
             if filename.lower().endswith(('.png', '.jpg', '.bmp')):
                 path = os.path.join(folder, filename)
                 try:
-                    # 必须保留 Alpha 通道 (IMREAD_UNCHANGED)
                     img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
                     if img is not None:
-                        # 如果是JPG没有透明通道，强制加一个全不透明的通道
                         if img.shape[2] == 3:
                             img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
                         templates.append(img)
@@ -70,9 +68,6 @@ class VisionEngine:
         try:
             with mss.mss() as sct:
                 img = np.array(sct.grab(monitor))
-                # mss 返回 BGRA
-                # 我们这里直接保留 BGRA，或者转 BGR 都可以
-                # 为了配合下面的匹配逻辑，我们统一转为 BGR，因为 mask 是独立传进去的
                 img_bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
                 
                 h, w = img_bgr.shape[:2]
@@ -88,11 +83,9 @@ class VisionEngine:
 
     def match_templates(self, screen_img, template_list, threshold, return_max_val=False):
         """
-        单一算法：基于掩码的彩色平方差匹配 (Color Masked SQDIFF)
-        
-        原理：
-        1. 严格比对 RGB 颜色。绿图标 vs 红模板 -> 差异极大 -> 低分。
-        2. 严格遵守 Mask。模板透明部分 -> 完全不参与计算 -> 忽略背景。
+        融合算法：
+        1. 严格颜色匹配 (SQDIFF): 解决红绿区分问题。
+        2. 归一化形状匹配 (Normalized CCOEFF): 解决亮背景下白色符号看不清的问题。
         """
         if screen_img is None:
             err = self.last_error if self.last_error else "未获取到截图"
@@ -102,18 +95,25 @@ class VisionEngine:
             return ("无模板", 0.0) if return_max_val else False
 
         screen_h, screen_w = screen_img.shape[:2]
+        
+        # === 预处理：归一化 (借鉴你上传的代码) ===
+        # 这能极大增强低对比度下的识别能力
+        try:
+            screen_norm = cv2.normalize(screen_img, None, 0, 255, cv2.NORM_MINMAX)
+        except:
+            screen_norm = screen_img
+
         max_score_found = 0.0
         all_skipped = True 
 
         for tmpl in template_list:
             tmpl_h, tmpl_w = tmpl.shape[:2]
             
-            # 尺寸检查
             if screen_h < tmpl_h or screen_w < tmpl_w:
                 continue 
             all_skipped = False 
 
-            # 准备数据：分离颜色通道(BGR) 和 Alpha通道(Mask)
+            # 准备数据
             if tmpl.shape[2] == 4:
                 tmpl_bgr = tmpl[:, :, :3]
                 mask = tmpl[:, :, 3]
@@ -121,48 +121,56 @@ class VisionEngine:
                 tmpl_bgr = tmpl
                 mask = np.ones((tmpl_h, tmpl_w), dtype=np.uint8) * 255
 
+            # --- 算法 A: 严格颜色匹配 (针对红名/本地栏) ---
+            # 这是我们之前的算法，对颜色极其敏感，绝不误报绿名
+            score_a = 0.0
             try:
-                # === 核心算法：TM_SQDIFF ===
-                # 计算公式：Sum( (T(x,y) - I(x,y))^2 )
-                # 只有 mask != 0 的点才计算
-                res = cv2.matchTemplate(screen_img, tmpl_bgr, cv2.TM_SQDIFF, mask=mask)
-                
-                # min_val 是最小的平方差总和 (越小越匹配)
-                min_val, _, _, _ = cv2.minMaxLoc(res)
-                
-                # === 分数转换逻辑 ===
-                # 1. 计算有效像素点数量 (不透明的像素)
+                res_a = cv2.matchTemplate(screen_img, tmpl_bgr, cv2.TM_SQDIFF, mask=mask)
+                min_val, _, _, _ = cv2.minMaxLoc(res_a)
                 valid_pixels = cv2.countNonZero(mask)
-                if valid_pixels == 0: continue
-                
-                # 2. 计算平均每个像素的差异值
-                # min_val 是所有像素差异的平方和。
-                # 平均平方差 = min_val / valid_pixels
-                # 平均像素差 (RMSE) = sqrt(平均平方差)
-                # 比如：如果颜色完全一样，diff = 0
-                # 如果只是亮度稍微变了一点，diff 可能是 10-20
-                # 如果红变绿，diff 可能是 150+
-                avg_diff = np.sqrt(min_val / valid_pixels)
-                
-                # 3. 线性映射到 0.0 - 1.0
-                # 我们定义一个 "最大容忍差异" (Max Tolerance)
-                # 假设容忍度是 60 (这意味着平均每个像素的颜色偏差在60以内都有分)
-                # 偏差 0 -> 100分
-                # 偏差 60 -> 0分
-                # 偏差 > 60 -> 0分
-                
-                tolerance = 60.0 
-                if avg_diff > tolerance:
-                    score = 0.0
-                else:
-                    score = 1.0 - (avg_diff / tolerance)
-                
-                if score > max_score_found:
-                    max_score_found = score
+                if valid_pixels > 0:
+                    avg_diff = min_val / valid_pixels
+                    # 容忍度设为 60
+                    if avg_diff < 60:
+                        score_a = 1.0 - (avg_diff / 60.0)
+            except: pass
 
-            except Exception as e:
-                # print(f"Error: {e}")
-                continue
+            # --- 算法 B: 归一化形状匹配 (针对怪物/白色符号) ---
+            # 借鉴了你上传代码的思路，但加上了 Mask 支持
+            score_b = 0.0
+            try:
+                # 对模板也进行归一化
+                tmpl_norm = cv2.normalize(tmpl_bgr, None, 0, 255, cv2.NORM_MINMAX)
+                
+                # 使用 CCOEFF_NORMED，它只看形状，不看亮度绝对值
+                # 配合 normalize 和 mask，能穿透亮背景识别白色符号
+                res_b = cv2.matchTemplate(screen_norm, tmpl_norm, cv2.TM_CCOEFF_NORMED, mask=mask)
+                _, max_val_b, _, _ = cv2.minMaxLoc(res_b)
+                
+                # 只有当分数非常高时才采纳，防止形状误报
+                # 因为这个算法不看颜色，容易把绿名当红名，所以我们只用它来“兜底”那些特别难识别的高亮符号
+                if max_val_b > 0.8: 
+                    score_b = max_val_b
+            except: pass
+
+            # === 智能融合决策 ===
+            # 如果是红名检测（本地/总览），我们主要信赖 A
+            # 如果是白色符号（怪物），A 可能会低，B 会很高
+            
+            # 这里取巧：如果 A 很高（颜色对上了），直接用 A
+            if score_a > 0.6:
+                final_score = score_a
+            else:
+                # 如果颜色没对上（可能是背景光干扰，也可能是真的不匹配）
+                # 我们看 B (形状)。如果形状分极高 (>0.9)，我们认为可能是光照问题，给予通过
+                # 但为了防止绿名误报，我们对 B 进行打折
+                if score_b > 0.9:
+                    final_score = score_b * 0.95 # 稍微扣点分表示不确定
+                else:
+                    final_score = score_b * 0.8 # 形状一般，颜色不对 -> 低分
+
+            if final_score > max_score_found:
+                max_score_found = final_score
 
         if all_skipped:
             return ("尺寸错误", 0.0) if return_max_val else False
