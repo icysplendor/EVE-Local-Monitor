@@ -19,6 +19,8 @@
 > 本仓库中的每一行代码——从 PyQT6 图形界面、多线程视觉逻辑，到配置管理系统——均由 **AI 编程智能体** 通过连续的对话指令生成。没有人类开发者手动编写任何代码。本项目旨在展示大语言模型（LLM）在复杂软件工程中的能力。
 
 ---
+## 请注意，本程序现在仅在游戏缩放率为100%的情况下才可以使用！
+## Please note that this program can only be used when the game scaling is 100%!
 
 ## ✨ Features / 功能特性
 
