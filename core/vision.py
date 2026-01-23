@@ -49,9 +49,10 @@ class VisionEngine:
             if filename.lower().endswith(('.png', '.jpg', '.bmp')):
                 path = os.path.join(folder, filename)
                 try:
+                    # 必须保留 Alpha 通道 (IMREAD_UNCHANGED)
                     img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
                     if img is not None:
-                        # 统一转为 BGRA (4通道) 方便后续处理
+                        # 如果是JPG没有透明通道，强制加一个全不透明的通道
                         if img.shape[2] == 3:
                             img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
                         templates.append(img)
@@ -69,23 +70,25 @@ class VisionEngine:
         try:
             with mss.mss() as sct:
                 img = np.array(sct.grab(monitor))
-                # 保持 BGRA，保留截图的完整性
-                img_bgra = img
+                # mss 返回 BGRA
+                # 为了后续处理方便，我们转为 BGR，因为归一化通常在 BGR 或 Gray 上做
+                img_bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
                 
-                h, w = img_bgra.shape[:2]
+                h, w = img_bgr.shape[:2]
                 self.last_screenshot_shape = f"{w}x{h}"
                 
                 if debug_name:
-                    # 调试保存时转 BGR，因为 imwrite 保存 png alpha 有时会有兼容问题
-                    cv2.imwrite(os.path.join(self.debug_dir, f"debug_{debug_name}.png"), cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR))
-                
-                return img_bgra # 返回 4通道 BGRA
+                    cv2.imwrite(os.path.join(self.debug_dir, f"debug_{debug_name}.png"), img_bgr)
+                return img_bgr
                 
         except Exception as e:
             self.last_error = f"截图失败: {str(e)}"
             return None
 
     def match_templates(self, screen_img, template_list, threshold, return_max_val=False):
+        """
+        参考用户提供的方案：回归 TM_CCOEFF_NORMED + 归一化预处理
+        """
         if screen_img is None:
             err = self.last_error if self.last_error else "未获取到截图"
             return (err, 0.0) if return_max_val else False
@@ -95,85 +98,50 @@ class VisionEngine:
 
         screen_h, screen_w = screen_img.shape[:2]
         
-        # === 预处理 1: 准备普通 BGR 截图 (用于颜色匹配) ===
-        screen_bgr = cv2.cvtColor(screen_img, cv2.COLOR_BGRA2BGR)
+        # === 关键步骤 1: 截图归一化 ===
+        # 将截图的对比度拉伸到 0-255，消除整体变灰/变亮的影响
+        screen_norm = cv2.normalize(screen_img, None, 0, 255, cv2.NORM_MINMAX)
         
-        # === 预处理 2: 准备归一化截图 (用于形状匹配) ===
-        # 归一化能拉伸对比度，让亮背景下的白色符号显形
-        try:
-            screen_norm = cv2.normalize(screen_bgr, None, 0, 255, cv2.NORM_MINMAX)
-        except:
-            screen_norm = screen_bgr
-
         max_score_found = 0.0
         all_skipped = True 
 
         for tmpl in template_list:
             tmpl_h, tmpl_w = tmpl.shape[:2]
             
+            # 尺寸检查
             if screen_h < tmpl_h or screen_w < tmpl_w:
                 continue 
             all_skipped = False 
 
-            # 分离通道：BGR 和 Alpha
-            tmpl_bgr = tmpl[:, :, :3]
-            mask = tmpl[:, :, 3]
-
-            # --- 算法 A: 严格颜色匹配 (SQDIFF) ---
-            # 解决红绿区分问题
-            score_a = 0.0
-            try:
-                res_a = cv2.matchTemplate(screen_bgr, tmpl_bgr, cv2.TM_SQDIFF, mask=mask)
-                min_val, _, _, _ = cv2.minMaxLoc(res_a)
-                valid_pixels = cv2.countNonZero(mask)
-                
-                if valid_pixels > 0:
-                    avg_diff = min_val / valid_pixels
-                    # 容忍度 60
-                    if avg_diff < 60:
-                        score_a = 1.0 - (avg_diff / 60.0)
-            except: pass
-
-            # --- 算法 B: 归一化形状匹配 (CCOEFF_NORMED) ---
-            # 解决亮背景看不清符号问题
-            score_b = 0.0
-            try:
-                # 仅对模板的颜色部分归一化，不要碰 mask
-                tmpl_norm = cv2.normalize(tmpl_bgr, None, 0, 255, cv2.NORM_MINMAX)
-                
-                res_b = cv2.matchTemplate(screen_norm, tmpl_norm, cv2.TM_CCOEFF_NORMED, mask=mask)
-                _, max_val_b, _, _ = cv2.minMaxLoc(res_b)
-                score_b = max_val_b
-            except: pass
-
-            # === 决策逻辑 ===
-            # 1. 如果颜色匹配度极高 (>0.8)，直接采纳。这说明颜色和形状都对上了。
-            if score_a > 0.8:
-                final_score = score_a
-            
-            # 2. 如果颜色匹配度低 (可能是背景光干扰，也可能是绿名)
+            # 准备数据
+            mask = None
+            if tmpl.shape[2] == 4:
+                # 移除 Alpha 通道，转为 BGR 用于归一化
+                tmpl_bgr = cv2.cvtColor(tmpl, cv2.COLOR_BGRA2BGR)
+                # 提取 Mask
+                mask = tmpl[:, :, 3]
             else:
-                # 我们检查形状分 (B)。
-                # 如果形状分极高 (>0.92)，我们认为这很可能是“亮背景下的白色符号”，
-                # 或者是“受到严重光照干扰的红名”。
-                # 为了防止把绿名(形状一样)误判进来，我们必须非常谨慎。
-                # 通常绿名和红名的形状分是一样的(都是1.0)，唯一的区别是颜色。
-                # 所以：如果颜色分(A)是 0，形状分(B)再高也不能信！
-                
-                # 但是！对于白色符号，颜色分(A)可能因为背景亮而变低。
-                # 这是一个两难。
-                
-                # 折中方案：
-                # 如果是 SQDIFF 算出完全不匹配 (score_a < 0.1)，那肯定是颜色不对(绿名)，直接杀掉。
-                # 如果 SQDIFF 算出有一点点像 (score_a > 0.1)，可能是光照干扰，这时才允许用 B 补救。
-                
-                if score_a < 0.05:
-                    final_score = 0.0 # 颜色完全不对，一票否决 (杀绿名)
-                else:
-                    final_score = score_b # 颜色稍微有点沾边，信赖形状 (救白符号)
+                tmpl_bgr = tmpl
+            
+            # === 关键步骤 2: 模板归一化 ===
+            tmpl_norm = cv2.normalize(tmpl_bgr, None, 0, 255, cv2.NORM_MINMAX)
 
-            if final_score > max_score_found:
-                max_score_found = final_score
+            try:
+                # === 核心算法：TM_CCOEFF_NORMED ===
+                # 使用归一化后的图片进行匹配
+                if mask is not None:
+                    res = cv2.matchTemplate(screen_norm, tmpl_norm, cv2.TM_CCOEFF_NORMED, mask=mask)
+                else:
+                    res = cv2.matchTemplate(screen_norm, tmpl_norm, cv2.TM_CCOEFF_NORMED)
+                
+                _, max_val, _, _ = cv2.minMaxLoc(res)
+                
+                if max_val > max_score_found:
+                    max_score_found = max_val
+
+            except Exception as e:
+                # print(f"Error: {e}")
+                continue
 
         if all_skipped:
             return ("尺寸错误", 0.0) if return_max_val else False
